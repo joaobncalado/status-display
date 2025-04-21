@@ -14,13 +14,13 @@ LOW_BATTERY_THRESHOLD = 20
 # === Funções auxiliares ===
 def get_battery():
     try:
-        logging.info("Initializing PiSugar2...")
+        logging.debug("Initializing PiSugar2...")
         ps = PiSugar2()
-        logging.info("Getting battery level...")
+        logging.debug("Getting battery level...")
         battery_percentage = ps.get_battery_percentage()
-        logging.info(
+        logging.debug(
             "Battery: " + str(int(battery_percentage.value)) + " %")
-        logging.info("Syncing RTC...")
+        logging.debug("Syncing RTC...")
         ps.set_pi_from_rtc()
         return int(battery_percentage.value)
     except Exception as e:
@@ -30,9 +30,9 @@ def get_battery():
 
 def check_pihole():
     try:
-        logging.debug(output = subprocess.check_output(["pihole", "status"]))
-        status = subprocess.check_output(["pihole", "status"], stderr=subprocess.DEVNULL).decode()
-        return "Ativo" if "Active" in status else "Inativo"
+        MPD_FILE = b"Pi-hole blocking is enabled" 
+        output = subprocess.check_output(["pihole", "status"])
+        return "Ativo" if MPD_FILE in output else "Inativo"
     except Exception as e:
         logging.error(e)
         return "Erro"
