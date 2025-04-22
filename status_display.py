@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 import subprocess
 import datetime
 import epd2in13_V2  # usa _V3 se for o teu modelo
 from pisugar2py import PiSugar2
 import logging
+import socket
+import os
+import shutil
+import json
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -24,33 +28,61 @@ def get_battery():
         ps.set_pi_from_rtc()
         return int(battery_percentage.value)
     except Exception as e:
+        logging.error("Error getting battery status")
         logging.error(e)
         ps = False
-        return None
+        return "N/A"
 
-def check_pihole():
+def check_pihole_status():
+    logging.debug("Checking PiHole status")
     try:
         MPD_FILE = b"Pi-hole blocking is enabled" 
         output = subprocess.check_output(["pihole", "status"])
         return "Ativo" if MPD_FILE in output else "Inativo"
     except Exception as e:
+        logging.error("Error checking PiHole status")
         logging.error(e)
-        return "Erro"
+        return "N/A"
+    
+def get_ip():
+    logging.debug("Checking IP")
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+    except Exception as e:
+        logging.error("Error checking IP")
+        logging.error(e)
+        ip = "N/A"
+    return ip
 
-def draw_battery(draw, x, y, percent):
-    draw.rectangle((x, y, x + 40, y + 20), outline=0, width=2)
-    draw.rectangle((x + 40, y + 6, x + 44, y + 14), fill=0)
-    level = int((percent / 100) * 3)
-    for i in range(level):
-        draw.rectangle((x + 4 + i * 12, y + 4, x + 14 + i * 12, y + 16), fill=0)
+def get_uptime():
+    logging.debug("Checking Up Time")
+    with open("/proc/uptime", "r") as f:
+        uptime_seconds = float(f.readline().split()[0])
+        hours = int(uptime_seconds // 3600)
+        minutes = int((uptime_seconds % 3600) // 60)
+        return f"{hours}h {minutes}m"
 
-def draw_pihole_icon(draw, x, y):
-    draw.ellipse((x, y, x + 24, y + 24), fill=0)
-    draw.polygon([(x + 12, y - 12), (x + 8, y), (x + 16, y)], fill=0)
+def get_temp():
+    logging.debug("Checking Temperature")
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+            return round(int(f.read()) / 1000, 1)
+    except Exception as e:
+        logging.error("Error checking temperature")
+        logging.error(e)
+        return "N/A"
 
-def draw_alert(draw, x, y, text):
-    draw.rectangle((x, y, x + 240, y + 25), fill=0)
-    draw.text((x + 10, y + 5), text, font=font_small_bold, fill=255)
+def get_free_space():
+    logging.debug("Checking Free Space")
+    total, used, free = shutil.disk_usage("/")
+    return round(free / (1024**3), 1)
+
+def check_internet():
+    logging.debug("Checking Internet")
+    return os.system("ping -c 1 8.8.8.8 > /dev/null 2>&1") == 0
 
 # === Main ===
 def main():
@@ -66,29 +98,40 @@ def main():
     font_small = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 14)
     font_small_bold = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 14)
 
-    now = datetime.datetime.now().strftime('%d/%m/%Y %H:%M')
+    #PiSugar2
+    battery_pct = get_battery()
 
-    battery = get_battery()
-    pihole_status = check_pihole()
+    # PiHole
+    pihole_status = check_pihole_status()
 
-    # Topo: Data e Hora
-    draw.text((10, 5), now, font=font_small, fill=0)
+    # Recolher dados
+    ip = get_ip()
+    uptime = get_uptime()
+    temp = get_temp()
+    free_gb = get_free_space()
+    internet_ok = check_internet()
+    now_str = datetime.datetime.now().strftime("%d/%m %H:%M")
 
-    # Bateria
-    draw_battery(draw, 10, 30, battery if battery is not None else 0)
-    draw.text((60, 32), f"Bateria: {battery}%", font=font_small, fill=0)
+    # Desenho
+    #Bateria: 72%    IP: 192.168.1.42
+    #Pi-hole: Ativo    Internet: OK
+    #Temp: 42.6°C    Uptime: 3h 42m
+    #Anúncios bloqueados: 18.3%
+    #------------------------------
+    #Atualizado: 20/04 14:58 
 
-    # Pi-hole
-    draw_pihole_icon(draw, 10, 70)
-    draw.text((60, 75), f"Pi-hole: {pihole_status}", font=font_large, fill=0)
+    draw.text((5, 5), f"Bateria: {battery_pct}%   IP: {ip}", font=font_small, fill=0)
+    draw.text((5, 25), f"Pi-hole: {pihole_status}    Internet: {'OK' if internet_ok else 'Falha'}", font=font_small, fill=0)
+    draw.text((5, 45), f"Temp: {temp}°C    Uptime: {uptime}", font=font_small, fill=0)
+    draw.text((5, 65), f"Espaço livre: {free_gb}GB", font=font_small, fill=0)
 
-    # Alertas
-    if battery is not None and battery < LOW_BATTERY_THRESHOLD:
-        draw_alert(draw, 0, height - 45, "ALERTA: Bateria fraca!")
-    if pihole_status != "Ativo":
-        draw_alert(draw, 0, height - 20, "ALERTA: Pi-hole inativo!")
+    draw.line((0, 102, width, 102), fill=0)
 
-    epd.display(epd.getbuffer(image))
+    draw.text((5, 105), f"Atualizado em: {now_str}", font=font_small, fill=0)
+
+    rotated_image = image.rotate(180)
+    color_inverted_image = ImageOps.invert(rotated_image.convert("L")).convert("1")
+    epd.display(epd.getbuffer(color_inverted_image))
     epd.sleep()
 
 if __name__ == "__main__":
