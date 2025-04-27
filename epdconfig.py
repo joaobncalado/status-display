@@ -13,11 +13,11 @@ import os
 import logging
 import sys
 import time
-import subprocess
 
 from ctypes import *
 
-logger = logging.getLogger(__name__)
+LOG = logging.getLogger(__name__)
+logging.basicConfig(level=logging.DEBUG)
 
 class RaspberryPi:
     # Pin definition
@@ -104,7 +104,7 @@ class RaspberryPi:
             self.DEV_SPI = None
             for find_dir in find_dirs:
                 val = int(os.popen('getconf LONG_BIT').read())
-                logging.debug("System is %d bit"%val)
+                LOG.debug("System is %d bit"%val)
                 if val == 64:
                     so_filename = os.path.join(find_dir, 'DEV_Config_64.so')
                 else:
@@ -125,13 +125,13 @@ class RaspberryPi:
         return 0
 
     def module_exit(self, cleanup=False):
-        logger.debug("spi end")
+        LOG.debug("SPI End")
         self.SPI.close()
 
         self.GPIO_RST_PIN.off()
         self.GPIO_DC_PIN.off()
         self.GPIO_PWR_PIN.off()
-        logger.debug("close 5V, Module enters 0 power consumption ...")
+        LOG.debug("Closed 5V, Module enters 0 power consumption...")
         
         if cleanup:
             self.GPIO_RST_PIN.close()
@@ -139,16 +139,6 @@ class RaspberryPi:
             # self.GPIO_CS_PIN.close()
             self.GPIO_PWR_PIN.close()
             self.GPIO_BUSY_PIN.close()
-            
-if sys.version_info[0] == 2:
-    process = subprocess.Popen("cat /proc/cpuinfo | grep Raspberry", shell=True, stdout=subprocess.PIPE)
-else:
-    process = subprocess.Popen("cat /proc/cpuinfo | grep Raspberry", shell=True, stdout=subprocess.PIPE, text=True)
-output, _ = process.communicate()
-if sys.version_info[0] == 2:
-    output = output.decode(sys.stdout.encoding)
-
-logger.debug("output: " + output)
 
 implementation = RaspberryPi()
 

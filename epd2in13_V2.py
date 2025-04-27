@@ -13,13 +13,14 @@ import logging
 import epdconfig
 
 # Display resolution
-EPD_WIDTH       = 122
-EPD_HEIGHT      = 250
+EPD_WIDTH = 122
+EPD_HEIGHT = 250
 
-logger = logging.getLogger(__name__)
+LOG = logging.getLogger(__name__)
+logging.basicConfig(level=logging.DEBUG)
 
 class EPD:
-    logger.debug("Initializing epd2in13_V2")
+    LOG.debug("Initializing epd2in13_V2")
     def __init__(self):
         self.reset_pin = epdconfig.RST_PIN
         self.dc_pin = epdconfig.DC_PIN
@@ -212,14 +213,14 @@ class EPD:
         pixels = image_monocolor.load()
         
         if(imwidth == self.width and imheight == self.height):
-            logger.debug("Vertical, imheight: %s, imwidth: %s", imheight, imwidth)
+            LOG.debug("Vertical image, image height: %s, image width: %s", imheight, imwidth)
             for y in range(imheight):
                 for x in range(imwidth):                    
                     if pixels[x, y] == 0:
                         x = imwidth - x
                         buf[int(x / 8) + y * linewidth] &= ~(0x80 >> (x % 8))
         elif(imwidth == self.height and imheight == self.width):
-            logger.debug("Horizontal, imheight: %s, imwidth: %s", imheight, imwidth)
+            LOG.debug("Horizontal image, image height: %s, image width: %s", imheight, imwidth)
             for y in range(imheight):
                 for x in range(imwidth):
                     newx = y
@@ -267,7 +268,7 @@ class EPD:
             linewidth = int(self.width/8)
         else:
             linewidth = int(self.width/8) + 1
-        # logger.debug(linewidth)
+        # LOG.debug(linewidth)
         
         buf = [0x00] * self.height * linewidth
         for j in range(0, self.height):
