@@ -1,179 +1,166 @@
 #!/usr/bin/env python3
-from PIL import Image, ImageDraw, ImageFont, ImageOps
-import subprocess
+import asyncio
+import aiohttp
+import asyncssh
+import logging
 import datetime
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 import epd2in13_V2
 from pisugar2py import PiSugar2
-import logging
+from dataclasses import dataclass
 import socket
-import requests
-import re
 
+# === Logger ===
 LOG = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG)
 
-# === Configurações ===
-LOW_BATTERY_THRESHOLD = 20
+# === Paths and Limits ===
 USER_PATH = '/home/secrets/pihole_user'
 PW_PATH = '/home/secrets/pihole_pw'
+LOW_BATTERY_THRESHOLD = 20
 
-# === Funções auxiliares ===
-def read_user_from_file():
+# === Data structures ===
+@dataclass
+class DeviceStatus:
+    ip: str
+    status: str
+    blocked_percentage: float
+    uptime: str
+    cpu_temp: float
+
+# === Aux funcs ===
+def read_from_file(path):
     try:
-        with open(USER_PATH, 'r') as file:
-            user = file.read().strip()
-            return user
+        with open(path, 'r') as f:
+            return f.read().strip()
     except Exception as e:
-        print(f"Error loading user: {e}")
+        LOG.error(f"Error loading file content: {e}")
         return None
 
-def read_password_from_file():
-    try:
-        with open(PW_PATH, 'r') as file:
-            password = file.read().strip()
-            return password
-    except Exception as e:
-        print(f"Error loading password: {e}")
-        return None
-
-# === PiSugar2 ===
-def get_battery():
+async def get_battery():
     try:
         LOG.debug("Initializing PiSugar2...")
         ps = PiSugar2()
-        LOG.debug("Getting battery level...")
         battery_percentage = ps.get_battery_percentage()
-        LOG.debug("Battery: " + str(int(battery_percentage.value)) + " %")
-        LOG.debug("Syncing RTC...")
         ps.set_pi_from_rtc()
         return int(battery_percentage.value)
     except Exception as e:
         LOG.error(f"Error getting battery status: {e}")
         return "N/A"
 
-# === PiHole ===    
-def authenticate(ip, password):
+# === PiHole funcs ===
+async def authenticate(session, ip, password):
     url = f"http://{ip}/api/auth"
     payload = {"password": password}
-    headers = {"Content-Type": "application/json"}
+    try:
+        async with session.post(url, json=payload) as response:
+            data = await response.json()
+            if not data.get("session", {}).get("valid"):
+                raise Exception("Session is not valid")
+            return data.get("session", {}).get("sid")
+    except Exception as e:
+        LOG.error(f"Authentication failed for {ip}: {e}")
+        return None
 
-    response = requests.post(url, json=payload, headers=headers)
-    response.raise_for_status()
-    data = response.json()
-
-    valid = data.get("session").get("valid")
-
-    if not valid:
-        raise Exception("Error authenticating, session is not valid")
-
-    return data.get("session").get("sid")
-
-def logout(ip, sid):
+async def logout(session, ip, sid):
     url = f"http://{ip}/api/auth"
-    headers = {"sid": sid}
-
     try:
-        response = requests.delete(url, headers=headers)
-        response.raise_for_status()
+        await session.delete(url, headers={"sid": sid})
     except Exception as e:
-        LOG.error(f"Error logging out: {e}")
+        LOG.error(f"Logout failed for {ip}: {e}")
 
-def get_blocked_percentage(ip, password):
+async def get_pihole_data(ip, password):
+    async with aiohttp.ClientSession() as session:
+        sid = await authenticate(session, ip, password)
+        if not sid:
+            return DeviceStatus(ip, "Error", 0.0, "N/A", "N/A")
+        
+        try:
+            # Status
+            status_url = f"http://{ip}/api/dns/blocking"
+            async with session.get(status_url, headers={"sid": sid}) as response:
+                blocking_data = await response.json()
+                status = blocking_data.get("blocking", "N/A")
+
+            # Blocked Percentage
+            summary_url = f"http://{ip}/api/stats/summary"
+            async with session.get(summary_url, headers={"sid": sid}) as response:
+                summary_data = await response.json()
+                blocked_percentage = summary_data["queries"].get("percent_blocked", 0.0)
+
+            return status, float(f"{blocked_percentage:.2f}")
+
+        except Exception as e:
+            LOG.error(f"Error getting PiHole data from {ip}: {e}")
+            return "N/A", 0.0
+        finally:
+            await logout(session, ip, sid)
+
+# === local and remote system funcs ===
+async def get_local_uptime():
     try:
-        sid = authenticate(ip, password)
+        with open("/proc/uptime", "r") as f:
+            uptime_seconds = float(f.readline().split()[0])
+            hours = int(uptime_seconds // 3600)
+            minutes = int((uptime_seconds % 3600) // 60)
+            return f"{hours}h {minutes}m"
     except Exception as e:
-        LOG.error(f"Error authenticating: {e}")
+        LOG.error(f"Error reading local uptime: {e}")
         return "N/A"
 
-    url = f"http://{ip}/api/stats/summary"
-    headers = {"sid": sid}
-
-    try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        logout(ip, sid)
-        summary = response.json()
-
-        battery_percentage = summary["queries"].get("percent_blocked", 0.0)
-        return float("{:.2f}".format(battery_percentage))
-    except Exception as e:
-        print(f"Error getting stats summary: {e}")
-        return "N/A"
-    
-def get_status(ip, password):
-    try:
-        sid = authenticate(ip, password)
-    except Exception as e:
-        LOG.error(f"Error authenticating: {e}")
-        return "N/A"
-    
-    url = f"http://{ip}/api/dns/blocking"
-    headers = {"sid": sid}
-    
-    try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        logout(ip, sid)
-        dns_blocking = response.json()
-
-        return dns_blocking.get("blocking")
-    except Exception as e:
-        print(f"Error getting DNS blocking status: {e}")
-        return "N/A"
-
-# === System ===
-def get_uptime():
-    LOG.debug("Checking local uptime")
-    with open("/proc/uptime", "r") as f:
-        uptime_seconds = float(f.readline().split()[0])
-        hours = int(uptime_seconds // 3600)
-        minutes = int((uptime_seconds % 3600) // 60)
-        return f"{hours}h {minutes}m"
-    
-def get_cpu_temp():
-    LOG.debug("Checking local CPU temperature")
+async def get_local_cpu_temp():
     try:
         with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
             return round(int(f.read()) / 1000, 1)
     except Exception as e:
-        LOG.error(f"Error checking local CPU temperature: {e}")
+        LOG.error(f"Error reading local CPU temp: {e}")
         return "N/A"
 
-# === Remote System ===
-def get_remote_uptime(ip, user, password):
-    LOG.debug("Checking remote uptime")
+async def get_remote_uptime(ip, user, password):
     try:
-        command = "sshpass -p " + password + " ssh " + user + "@" + ip + " cat /proc/uptime"
-        output = subprocess.getstatusoutput(command)
-        LOG.debug(f"Remote Uptime: {output}")
-        uptime_seconds = float(output[1].split()[0])
-        hours = int(uptime_seconds // 3600)
-        minutes = int((uptime_seconds % 3600) // 60)
-        return f"{hours}h {minutes}m"
+        async with asyncssh.connect(ip, username=user, password=password, known_hosts=None) as conn:
+            result = await conn.run('cat /proc/uptime')
+            uptime_seconds = float(result.stdout.split()[0])
+            hours = int(uptime_seconds // 3600)
+            minutes = int((uptime_seconds % 3600) // 60)
+            return f"{hours}h {minutes}m"
     except Exception as e:
-        LOG.error(f"Error reading remote uptime: {e}")
-        return 0
-
-def get_remote_cpu_temp(ip, user, password):
-    LOG.debug("Checking remote CPU temperature")
-    try:
-        command = "sshpass -p " + password + " ssh " + user + "@" + ip + " cat /sys/class/thermal/thermal_zone0/temp"
-        output = subprocess.getstatusoutput(command)
-        LOG.debug(f"Remote CPU Temperature: {output}")
-        return round(int(output[1]) / 1000, 1)
-    except Exception as e:
-        LOG.error(f"Error reading remote CPU temperature: {e}")
+        LOG.error(f"Error getting remote uptime: {e}")
         return "N/A"
 
-# === Main ===
-def main():
+async def get_remote_cpu_temp(ip, user, password):
+    try:
+        async with asyncssh.connect(ip, username=user, password=password, known_hosts=None) as conn:
+            result = await conn.run('cat /sys/class/thermal/thermal_zone0/temp')
+            return round(int(result.stdout.strip()) / 1000, 1)
+    except Exception as e:
+        LOG.error(f"Error getting remote CPU temp: {e}")
+        return "N/A"
+
+# === main ===
+async def main():
     pihole1_ip = '192.168.50.135'
-    pihole2_ip = '192.168.50.136'
-    localhost = '127.0.0.1'
+    pihole2_ip = '127.0.0.1'
 
-    password = read_password_from_file()
-    user = read_user_from_file()
+    user = read_from_file(USER_PATH)
+    password = read_from_file(PW_PATH)
 
+    # parallel execution
+    results = await asyncio.gather(
+        get_pihole_data(pihole1_ip, password),
+        get_pihole_data(pihole2_ip, password),
+        get_remote_uptime(pihole1_ip, user, password),
+        get_remote_cpu_temp(pihole1_ip, user, password),
+        get_local_uptime(),
+        get_local_cpu_temp(),
+        get_battery()
+    )
+
+    # split results
+    (pihole1_status, pihole1_blocked), (pihole2_status, pihole2_blocked), \
+    pihole1_uptime, pihole1_temp, pihole2_uptime, pihole2_temp, battery = results
+
+    # start display
     epd = epd2in13_V2.EPD()
     epd.init(epd.FULL_UPDATE)
     width, height = epd.height, epd.width
@@ -181,67 +168,43 @@ def main():
     image = Image.new('1', (width, height), 255)
     draw = ImageDraw.Draw(image)
 
-    # PiHole1
-    pihole1_status = get_status(pihole1_ip, password)
-    LOG.debug(f"Pi-hole 1 Status:  {pihole1_status}")
-    pihole1_blocked_percentage = get_blocked_percentage(pihole1_ip, password)
-    LOG.debug(f"Pi-hole 1 Blocked Ads: {pihole1_blocked_percentage}%")
-    pihole1_uptime = get_remote_uptime(pihole1_ip, user, password)
-    LOG.debug(f"Pi-hole 1 Uptime: {pihole1_uptime}")
-    pihole1_cpu_temperature = get_remote_cpu_temp(pihole1_ip, user, password)
-    LOG.debug(f"Pi-hole 1 CPU Temperature: {pihole1_cpu_temperature}")
-
-    # PiHole2
-    pihole2_status = get_status(localhost, password)
-    LOG.debug(f"Pi-hole 2 Status:  {pihole2_status}")
-    pihole2_blocked_percentage = get_blocked_percentage(localhost, password)
-    LOG.debug(f"Pi-hole 2 Blocked Ads: {pihole2_blocked_percentage}%")
-    pihole2_uptime = get_uptime()
-    LOG.debug(f"Pi-hole 2 Uptime: {pihole2_uptime}")
-    pihole2_temperature = get_cpu_temp()
-    LOG.debug(f"Pi-hole 2 CPU Temperature: {pihole2_temperature}")
-
-    # PiSugar2
-    battery_percentage = get_battery()
-    LOG.debug(f"Battery Status: {battery_percentage}")
+    font_bold = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 20)
+    font_small = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 14)
 
     now_str = datetime.datetime.now().strftime("%d/%m %H:%M")
 
-    global font_small, font_large, font_small_bold
-    font_large = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 20)
-    font_small = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 14)
-    font_small_bold = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 14)
-    #+---------------------------------+
-    #| 192.168.50.135 | 192.168.50.136 |
-    #| Active         | Active         |
-    #| 10d 03:15:42   | 03d 12:48:21   |
-    #| Blocked: 85%   | Blocked: 78%   |
-    #| CPU: 55°C      | CPU: 50°C      |
-    #|---------------------------------|
-    #| [85%] 2025-04-27 12:34:56       |
-    #+---------------------------------+
-    # Desenhar as informações de Pi-hole 1
-    draw.text((10, 6), f"{pihole1_ip}", font=font_small, fill=0)
+    # --- layout drawing ---
+    # Headers
+    draw.text((10, 6), f"{pihole1_ip}", font=font_bold, fill=0)
+    draw.text((130, 6), f"{pihole2_ip}", font=font_bold, fill=0)
+
+    # Data
     draw.text((10, 25), f"Status: {pihole1_status}", font=font_small, fill=0)
     draw.text((10, 44), f"Uptime: {pihole1_uptime}", font=font_small, fill=0)
-    draw.text((10, 63), f"Blocked: {pihole1_blocked_percentage}%", font=font_small, fill=0)
-    draw.text((10, 82), f"Temp: {pihole1_cpu_temperature}ºC", font=font_small, fill=0)
+    draw.text((10, 63), f"Blocked: {pihole1_blocked}%", font=font_small, fill=0)
+    draw.text((10, 82), f"Temp: {pihole1_temp}°C", font=font_small, fill=0)
 
-    # Desenhar as informações de Pi-hole 2
-    draw.text((130, 6), f"{pihole2_ip}", font=font_small, fill=0)
     draw.text((130, 25), f"Status: {pihole2_status}", font=font_small, fill=0)
     draw.text((130, 44), f"Uptime: {pihole2_uptime}", font=font_small, fill=0)
-    draw.text((130, 63), f"Blocked: {pihole2_blocked_percentage}%", font=font_small, fill=0)
-    draw.text((130, 82), f"Temp: {pihole2_temperature}%", font=font_small, fill=0)
+    draw.text((130, 63), f"Blocked: {pihole2_blocked}%", font=font_small, fill=0)
+    draw.text((130, 82), f"Temp: {pihole2_temp}°C", font=font_small, fill=0)
 
-    # Rodapé com a percentagem de bateria e data/hora de atualização
-    draw.text((10, 101), f"[{battery_percentage}%]", font=font_small, fill=0)
-    draw.text((160, 101), f"{now_str}", font=font_small, fill=0)
+    # Separator lines
+    draw.line((122, 0, 122, height), fill=0)  # Vertical separator
+    draw.line((0, 100, width, 100), fill=0)   # Horizontal footer separator
 
+    # Battery bar + percentage
+    battery_bar_length = int(50 * battery / 100) if isinstance(battery, int) else 0
+    draw.rectangle((10, 103, 10 + battery_bar_length, 115), fill=0)
+    draw.rectangle((10, 103, 60, 115), outline=0)  # Battery outline
+    draw.text((80, 101), f"{round(battery)}%", font=font_small, fill=0)
+    draw.text((160, 101), now_str, font=font_small, fill=0)
+
+    # Final display
     rotated_image = image.rotate(180)
-    color_inverted_image = ImageOps.invert(rotated_image.convert("L")).convert("1")
-    epd.display(epd.getbuffer(color_inverted_image))
+    bw_image = rotated_image.convert("1")
+    epd.display(epd.getbuffer(bw_image))
     epd.sleep()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
