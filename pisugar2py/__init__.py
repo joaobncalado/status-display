@@ -6,12 +6,15 @@
 
 # This library connects over tcp using a netcat like interaction
 # and supports all of the currently published commands.
-
 from __future__ import annotations
 import socket
 from collections import namedtuple
 from datetime import datetime
+import logging
 
+# === Logger ===
+LOG = logging.getLogger(__name__)
+logging.basicConfig(level=logging.DEBUG)
 
 class Netcat:
 
@@ -68,11 +71,14 @@ class PiSugar2:
     """Defaults to localhost on the default port but can specify ip and port"""
 
     def __init__(self, ip="127.0.0.1", port=8423):
-        self.netcat = Netcat(ip, port)
-        self._model = None
+        try:
+            self.netcat = Netcat(ip, port)
+            self._model = None
 
-        # Create a named tuple
-        self.nt_values = namedtuple("PiSugar2", "name value command")
+            # Create a named tuple
+            self.nt_values = namedtuple("PiSugar2", "name value command")
+        except Exception as e:
+            LOG.error(f"Error initializing PiSugar2: {e}")
 
     def _is_float(self, value):
         # Check if a value passed is a float
