@@ -5,7 +5,6 @@ import subprocess
 import requests
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 import epd2in13_V2
-from pisugar2py import PiSugar2
 
 # === Logger ===
 LOG = logging.getLogger(__name__)
@@ -27,13 +26,18 @@ def read_from_file(path):
 
 def get_battery():
     try:
-        LOG.debug("Initializing PiSugar2...")
-        ps = PiSugar2()
-        battery_percentage = ps.get_battery_percentage()
-        ps.set_pi_from_rtc()
-        return int(battery_percentage.value)
+        LOG.debug("Getting battery info via netcat")
+        command = 'echo "get battery" | nc -q 0 127.0.0.1 8423'
+        output = subprocess.check_output(command, shell=True, text=True)
+        for line in output.splitlines():
+            if line.lower().startswith("battery:"):
+                battery_value = float(line.split(":")[1].strip())
+                LOG.debug(f"Battery % is: {battery_value}")
+                return int(round(battery_value))
+        LOG.warning("Battery info not found in output")
+        return "N/A"
     except Exception as e:
-        LOG.error(f"Error getting battery status: {e}")
+        LOG.error(f"Error getting battery status via netcat: {e}")
         return "N/A"
 
 # === PiHole funcs ===
@@ -97,6 +101,7 @@ def get_local_cpu_temp():
 
 def get_remote_uptime(ip, user, password):
     try:
+        LOG.debug(f"Reading remote uptime on: {ip}")
         command = f"sshpass -p '{password}' ssh -o StrictHostKeyChecking=no {user}@{ip} cat /proc/uptime"
         output = subprocess.getoutput(command)
         uptime_seconds = float(output.split()[0])
@@ -109,6 +114,7 @@ def get_remote_uptime(ip, user, password):
 
 def get_remote_cpu_temp(ip, user, password):
     try:
+        LOG.debug(f"Reading remote CPU Temp on: {ip}")
         command = f"sshpass -p '{password}' ssh -o StrictHostKeyChecking=no {user}@{ip} cat /sys/class/thermal/thermal_zone0/temp"
         output = subprocess.getoutput(command)
         return round(int(output.strip()) / 1000, 1)
@@ -118,6 +124,7 @@ def get_remote_cpu_temp(ip, user, password):
 
 # === Main ===
 def main():
+    LOG.debug("Starting execution")
     pihole1_ip = '192.168.50.135'
     pihole2_ip = '127.0.0.1'
 
